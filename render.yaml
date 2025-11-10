@@ -44,5 +44,11 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-    healthCheckPath: /
+    healthCheckPath: /health
     autoDeploy: true
+    plan: free
+    envVars:
+      - key: MAX_DATABASE_RETRIES
+        value: "5"
+      - key: DATABASE_RETRY_DELAY
+        value: "5"

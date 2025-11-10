@@ -18,30 +18,70 @@ from sqlalchemy import create_engine, text
 
 # --- App Configuration ---
 load_dotenv()
+
+from datetime import datetime  # Add this import at the top
+
+app = Flask(__name__)
+app.secret_key = os.getenv('SECRET_KEY', 'your-secret-key-here')  # Change this!
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Render"""
+    try:
+        # Verify database connection
+        db.session.execute('SELECT 1')
+        db.session.commit()
+        return jsonify({
+            'status': 'healthy',
+            'database': 'connected',
+            'timestamp': datetime.utcnow().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'database': str(e),
+            'timestamp': datetime.utcnow().isoformat()
+        }), 500
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
 REPORT_FOLDER = 'reports'
 os.makedirs(REPORT_FOLDER, exist_ok=True)
 
 # --- Database Configuration ---
-DATABASE_URL = os.getenv('DATABASE_URL')
-if not DATABASE_URL:
-    raise ValueError("No DATABASE_URL environment variable set. Please configure your database connection.")
+def get_database_url():
+    """Get database URL with fallback for development"""
+    database_url = os.getenv('DATABASE_URL')
+    
+    if not database_url:
+        # Development fallback
+        print("WARNING: No DATABASE_URL found. Using default local database for development.")
+        return 'postgresql://postgres:postgres@localhost:5432/hiring_platform'
+    
+    # Convert postgres:// to postgresql:// (Render uses postgres://)
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+    
+    return database_url
 
-# Convert postgres:// to postgresql:// (Render uses postgres://)
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-# Configure SQLAlchemy
-app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+# Configure SQLAlchemy with better connection handling
+app.config['SQLALCHEMY_DATABASE_URI'] = get_database_url()
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_pre_ping': True,  # Enable connection health checks
-    'pool_recycle': 300,    # Recycle connections every 5 minutes
-    'pool_timeout': 30,     # Wait up to 30 seconds for a connection
-    'max_overflow': 10      # Allow up to 10 extra connections
+    'pool_pre_ping': True,         # Enable connection health checks
+    'pool_recycle': 300,           # Recycle connections every 5 minutes
+    'pool_timeout': 30,            # Wait up to 30 seconds for a connection
+    'max_overflow': 10,            # Allow up to 10 extra connections
+    'connect_args': {
+        'connect_timeout': 10,      # Connection timeout in seconds
+        'application_name': 'interview-platform'  # Identify app in pg_stat_activity
+    }
 }
+
+# Initialize SQLAlchemy
 db = SQLAlchemy(app)
+
+# Print database connection info (helpful for debugging)
+print(f"Connecting to database: {app.config['SQLALCHEMY_DATABASE_URI'].split('@')[1] if '@' in app.config['SQLALCHEMY_DATABASE_URI'] else 'local'}")
 
 # --- Email Configuration ---
 app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER')
