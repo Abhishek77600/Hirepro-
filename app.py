@@ -29,17 +29,19 @@ def health_check():
     """Health check endpoint for Render"""
     try:
         # Verify database connection
-        db.session.execute('SELECT 1')
+        db.session.execute(text('SELECT 1'))
         db.session.commit()
         return jsonify({
             'status': 'healthy',
             'database': 'connected',
+            'database_url': app.config['SQLALCHEMY_DATABASE_URI'].split('@')[1] if '@' in app.config['SQLALCHEMY_DATABASE_URI'] else 'local',
             'timestamp': datetime.utcnow().isoformat()
         })
     except Exception as e:
         return jsonify({
             'status': 'unhealthy',
             'database': str(e),
+            'database_url': app.config['SQLALCHEMY_DATABASE_URI'].split('@')[1] if '@' in app.config['SQLALCHEMY_DATABASE_URI'] else 'local',
             'timestamp': datetime.utcnow().isoformat()
         }), 500
 app = Flask(__name__)
@@ -87,10 +89,14 @@ except Exception as e:
     print(f"Error initializing database: {str(e)}")
     raise
 
+# Import the text function for raw SQL
+from sqlalchemy import text
+
 # Verify database connection on startup
 with app.app_context():
     try:
-        db.session.execute('SELECT 1')
+        db.session.execute(text('SELECT 1'))
+        db.session.commit()
         print("Database connection test successful!")
     except Exception as e:
         print(f"Database connection test failed: {str(e)}")
