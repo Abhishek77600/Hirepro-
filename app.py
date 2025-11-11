@@ -32,10 +32,22 @@ def health_check():
         # Verify database connection
         db.session.execute(text('SELECT 1'))
         db.session.commit()
+        
+        # Check email configuration
+        sendgrid_key = os.getenv('SENDGRID_API_KEY')
+        mail_sender = os.getenv('MAIL_DEFAULT_SENDER')
+        email_configured = bool(sendgrid_key and mail_sender)
+        
         return jsonify({
             'status': 'healthy',
             'database': 'connected',
             'database_url': app.config['SQLALCHEMY_DATABASE_URI'].split('@')[1] if '@' in app.config['SQLALCHEMY_DATABASE_URI'] else 'local',
+            'email': {
+                'configured': email_configured,
+                'sendgrid_key_set': bool(sendgrid_key),
+                'sender_set': bool(mail_sender),
+                'sender_email': mail_sender if mail_sender else None
+            },
             'timestamp': datetime.utcnow().isoformat()
         })
     except Exception as e:
@@ -44,6 +56,38 @@ def health_check():
             'database': str(e),
             'database_url': app.config['SQLALCHEMY_DATABASE_URI'].split('@')[1] if '@' in app.config['SQLALCHEMY_DATABASE_URI'] else 'local',
             'timestamp': datetime.utcnow().isoformat()
+        }), 500
+
+@app.route('/api/test-email', methods=['POST'])
+def test_email():
+    """Test endpoint to verify email configuration and send a test email"""
+    if session.get('user_type') != 'admin':
+        return jsonify({'error': 'Unauthorized. Admin access required.'}), 401
+    
+    data = request.json or {}
+    test_email_address = data.get('email', session.get('admin_email', 'test@example.com'))
+    
+    try:
+        send_email(
+            to_email=test_email_address,
+            subject='Test Email from HirePro',
+            body='This is a test email to verify SendGrid configuration is working correctly.'
+        )
+        return jsonify({
+            'message': 'Test email sent successfully!',
+            'sent_to': test_email_address,
+            'note': 'Check your inbox (and spam folder) for the test email.'
+        })
+    except Exception as e:
+        return jsonify({
+            'error': 'Failed to send test email',
+            'details': str(e),
+            'troubleshooting': {
+                'check_sendgrid_key': 'Verify SENDGRID_API_KEY is set correctly in Render dashboard',
+                'check_sender': 'Verify MAIL_DEFAULT_SENDER is set and the email is verified in SendGrid',
+                'verify_sender': 'Go to SendGrid dashboard > Settings > Sender Authentication to verify your sender email',
+                'check_permissions': 'Ensure your API key has "Mail Send" permissions'
+            }
         }), 500
 REPORT_FOLDER = 'reports'
 os.makedirs(REPORT_FOLDER, exist_ok=True)
