@@ -13,6 +13,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.colors import navy, black, red
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
 
 # --- App Configuration ---
 load_dotenv()
