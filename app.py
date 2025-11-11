@@ -47,6 +47,26 @@ def health_check():
             'database_url': app.config['SQLALCHEMY_DATABASE_URI'].split('@')[1] if '@' in app.config['SQLALCHEMY_DATABASE_URI'] else 'local',
             'timestamp': datetime.utcnow().isoformat()
         }), 500
+
+@app.route('/api/debug/email_config')
+def debug_email_config():
+    """Diagnostic endpoint: check email provider configuration (no secrets exposed)"""
+    resend_present = bool(os.getenv('RESEND_API_KEY'))
+    resend_client_ready = resend_client is not None
+    mail_sender = app.config.get('MAIL_DEFAULT_SENDER', 'NOT SET')
+    smtp_server = app.config.get('MAIL_SERVER', 'NOT SET')
+    smtp_port = app.config.get('MAIL_PORT', 'NOT SET')
+    
+    return jsonify({
+        'timestamp': datetime.utcnow().isoformat(),
+        'resend_api_key_present': resend_present,
+        'resend_client_initialized': resend_client_ready,
+        'mail_default_sender': mail_sender,
+        'smtp_server': smtp_server,
+        'smtp_port': smtp_port,
+        'primary_method': 'Resend API' if resend_client_ready else 'SMTP fallback' if smtp_server != 'NOT SET' else 'NONE - email may fail'
+    })
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
 REPORT_FOLDER = 'reports'
