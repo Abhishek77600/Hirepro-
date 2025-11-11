@@ -20,6 +20,7 @@ from sqlalchemy import create_engine, text
 load_dotenv()
 
 from datetime import datetime  # Add this import at the top
+from email_helper import send_email
 from urllib.parse import urlparse
 
 app = Flask(__name__)
