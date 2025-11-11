@@ -229,8 +229,13 @@ if RESEND_API_KEY:
                         json=payload,
                         timeout=15
                     )
-                    resp.raise_for_status()
-                    return {'status_code': resp.status_code, 'body': resp.text}
+                    try:
+                        resp.raise_for_status()
+                        return {'status_code': resp.status_code, 'body': resp.text}
+                    except requests.exceptions.HTTPError as http_err:
+                        # Attach response text for easier debugging upstream
+                        content = resp.text
+                        raise RuntimeError(f"Resend HTTP {resp.status_code} error: {content}") from http_err
 
             resend_client = SimpleResendClient(RESEND_API_KEY)
             print('✓ Resend HTTP client configured')
