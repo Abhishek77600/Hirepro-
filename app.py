@@ -182,16 +182,60 @@ with app.app_context():
 # --- Email Configuration (Resend API only) ---
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER', 'noreply@example.com')
 
-# Initialize Resend client
+# Initialize Resend client (try SDK first, fallback to lightweight HTTP client)
 RESEND_API_KEY = os.getenv('RESEND_API_KEY')
 resend_client = None
 if RESEND_API_KEY:
     try:
+        # Preferred: official Resend Python SDK (if available)
         from resend import Resend
         resend_client = Resend(RESEND_API_KEY)
-        print("✓ Resend email client initialized successfully")
+        print("✓ Resend SDK client initialized successfully")
     except Exception as e:
-        print(f"⚠ Warning: Failed to initialize Resend client: {e}")
+        print(f"⚠ Resend SDK import failed: {e}; falling back to HTTP API via requests")
+        # Fallback: simple HTTP client using requests so we don't depend on SDK shape
+        try:
+            import requests
+
+            class SimpleResendClient:
+                def __init__(self, api_key):
+                    self.api_key = api_key
+                    # mimic SDK surface: `.emails.send(...)`
+                    self.emails = self
+
+                def send(self, *args, **kwargs):
+                    # Accept positional or keyword args used by various SDK versions
+                    to = kwargs.get('to') or (args[0] if len(args) > 0 else None)
+                    from_ = kwargs.get('from_') or kwargs.get('from') or (args[1] if len(args) > 1 else None)
+                    subject = kwargs.get('subject') or (args[2] if len(args) > 2 else None)
+                    html = kwargs.get('html') or kwargs.get('text') or (args[3] if len(args) > 3 else None)
+
+                    if not (to and from_ and subject and html):
+                        raise ValueError('Missing required email fields for Resend HTTP API')
+
+                    payload = {
+                        'from': from_,
+                        'to': [to],
+                        'subject': subject,
+                        'html': html
+                    }
+
+                    resp = requests.post(
+                        'https://api.resend.com/emails',
+                        headers={
+                            'Authorization': f'Bearer {self.api_key}',
+                            'Content-Type': 'application/json'
+                        },
+                        json=payload,
+                        timeout=15
+                    )
+                    resp.raise_for_status()
+                    return {'status_code': resp.status_code, 'body': resp.text}
+
+            resend_client = SimpleResendClient(RESEND_API_KEY)
+            print('✓ Resend HTTP client configured')
+        except Exception as e2:
+            print(f"⚠ Failed to configure fallback Resend HTTP client: {e2}")
 else:
     print("⚠ RESEND_API_KEY not set — email sending will fail")
 

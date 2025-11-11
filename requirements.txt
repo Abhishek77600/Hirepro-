@@ -9,3 +9,4 @@ psycopg2-binary
 SQLAlchemy
 Flask-SQLAlchemy
 resend
+requests
