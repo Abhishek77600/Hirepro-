@@ -64,6 +64,43 @@ def debug_email_config():
         'primary_method': 'Resend API' if resend_client_ready else 'SMTP fallback' if smtp_server != 'NOT SET' else 'NONE - email may fail'
     })
 
+
+@app.route('/api/debug/db_config')
+def debug_db_config():
+    """Diagnostic endpoint to inspect DATABASE_URL host and DNS resolution.
+    Does not expose credentials.
+    """
+    database_url = os.getenv('DATABASE_URL') or app.config.get('SQLALCHEMY_DATABASE_URI')
+    if not database_url:
+        return jsonify({'error': 'DATABASE_URL not set in environment or app config.'}), 500
+
+    try:
+        parsed = urlparse(database_url)
+        host = parsed.hostname
+        port = parsed.port
+        dbname = parsed.path[1:] if parsed.path.startswith('/') else parsed.path
+        # Try to resolve hostname to IP(s)
+        import socket
+        try:
+            addrs = socket.getaddrinfo(host, port or 5432)
+            resolved = sorted(list({a[4][0] for a in addrs}))
+            dns_ok = True
+        except Exception as e:
+            resolved = []
+            dns_ok = False
+
+        return jsonify({
+            'database_url_present': True,
+            'host': host,
+            'port': port,
+            'dbname': dbname,
+            'dns_resolves': dns_ok,
+            'resolved_addresses': resolved,
+            'note': 'This endpoint does NOT expose credentials. If dns_resolves is false, check DATABASE_URL in Render and that the DB service is linked.'
+        })
+    except Exception as e:
+        return jsonify({'error': f'Failed to parse DATABASE_URL: {str(e)}'}), 500
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
 REPORT_FOLDER = 'reports'
