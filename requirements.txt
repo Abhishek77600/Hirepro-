@@ -1,4 +1,4 @@
-Flask
+﻿Flask
 python-dotenv
 google-generativeai
 PyPDF2
@@ -9,3 +9,4 @@ Flask-Mail
 psycopg2-binary
 SQLAlchemy
 Flask-SQLAlchemy
+sendgrid
