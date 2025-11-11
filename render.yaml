@@ -32,7 +32,7 @@ services:
           property: connectionString
       - key: FLASK_SECRET_KEY
         generateValue: true
-      - key: SENDGRID_API_KEY
+      - key: RESEND_API_KEY
         sync: false
       - key: MAIL_DEFAULT_SENDER
         sync: false

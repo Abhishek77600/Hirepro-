@@ -18,10 +18,7 @@ from dotenv import load_dotenv
 # --- App Configuration ---
 load_dotenv()
 
-from datetime import datetime  # Add this import at the top
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from datetime import datetime
 from urllib.parse import urlparse
 
 app = Flask(__name__)
@@ -145,46 +142,40 @@ with app.app_context():
         raise
 
 
-# --- Email Configuration ---
-app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER')
-app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
-app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'True').lower() in ['true', 'on', '1']
-app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
-app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
-app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER', app.config['MAIL_USERNAME'])
+# --- Email Configuration (Resend API only) ---
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER', 'noreply@example.com')
 
 def send_email(to_email, subject, body, html_body=None):
-    """Send an email via SMTP. Returns True on success, raises on failure."""
-    mail_server = app.config['MAIL_SERVER']
-    mail_port = app.config['MAIL_PORT']
-    mail_username = app.config['MAIL_USERNAME']
-    mail_password = app.config['MAIL_PASSWORD']
-    sender = app.config['MAIL_DEFAULT_SENDER']
-    use_tls = app.config['MAIL_USE_TLS']
-
-    if not mail_server or not mail_username or not mail_password:
-        raise RuntimeError('Email not configured. Set MAIL_SERVER, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER env vars')
-
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From'] = sender
-    msg['To'] = to_email
-    msg.attach(MIMEText(body, 'plain'))
-    if html_body:
-        msg.attach(MIMEText(html_body, 'html'))
-
+    """Send an email via Resend API (HTTPS-based, reliable on Render).
+    Requires RESEND_API_KEY env var to be set.
+    """
+    if not resend_client:
+        raise RuntimeError(
+            'Resend API not configured. Set RESEND_API_KEY environment variable. '
+            'Get it from https://resend.com/api-keys'
+        )
+    
+    sender = app.config.get('MAIL_DEFAULT_SENDER')
+    if not sender:
+        raise RuntimeError('MAIL_DEFAULT_SENDER environment variable is not set')
+    
     try:
-        with smtplib.SMTP(mail_server, mail_port, timeout=20) as server:
-            server.ehlo()
-            if use_tls:
-                server.starttls()
-                server.ehlo()
-            server.login(mail_username, mail_password)
-            server.send_message(msg)
-        print(f"Email sent to {to_email} via SMTP")
+        # Convert plain text to HTML if not provided
+        payload_html = html_body if html_body else (body.replace('\n', '<br/>'))
+        
+        print(f"Sending email via Resend: to={to_email}, from={sender}")
+        resp = resend_client.emails.send(
+            to=to_email,
+            from_=sender,
+            subject=subject,
+            html=payload_html
+        )
+        print(f"Email sent successfully via Resend: {resp}")
         return True
     except Exception as e:
-        print(f"SMTP send error: {e}")
+        print(f"Resend API error: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 # --- Database Models ---
