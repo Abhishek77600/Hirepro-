@@ -12,6 +12,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.colors import navy, black, red
+from flask_mail import Mail, Message
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import create_engine, text
 
@@ -19,11 +20,10 @@ from sqlalchemy import create_engine, text
 load_dotenv()
 
 from datetime import datetime  # Add this import at the top
-from email_helper import send_email
 from urllib.parse import urlparse
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
+app.secret_key = os.getenv('SECRET_KEY', 'your-secret-key-here')  # Change this!
 
 @app.route('/health')
 def health_check():
@@ -32,22 +32,10 @@ def health_check():
         # Verify database connection
         db.session.execute(text('SELECT 1'))
         db.session.commit()
-        
-        # Check email configuration
-        sendgrid_key = os.getenv('SENDGRID_API_KEY')
-        mail_sender = os.getenv('MAIL_DEFAULT_SENDER')
-        email_configured = bool(sendgrid_key and mail_sender)
-        
         return jsonify({
             'status': 'healthy',
             'database': 'connected',
             'database_url': app.config['SQLALCHEMY_DATABASE_URI'].split('@')[1] if '@' in app.config['SQLALCHEMY_DATABASE_URI'] else 'local',
-            'email': {
-                'configured': email_configured,
-                'sendgrid_key_set': bool(sendgrid_key),
-                'sender_set': bool(mail_sender),
-                'sender_email': mail_sender if mail_sender else None
-            },
             'timestamp': datetime.utcnow().isoformat()
         })
     except Exception as e:
@@ -57,38 +45,8 @@ def health_check():
             'database_url': app.config['SQLALCHEMY_DATABASE_URI'].split('@')[1] if '@' in app.config['SQLALCHEMY_DATABASE_URI'] else 'local',
             'timestamp': datetime.utcnow().isoformat()
         }), 500
-
-@app.route('/api/test-email', methods=['POST'])
-def test_email():
-    """Test endpoint to verify email configuration and send a test email"""
-    if session.get('user_type') != 'admin':
-        return jsonify({'error': 'Unauthorized. Admin access required.'}), 401
-    
-    data = request.json or {}
-    test_email_address = data.get('email', session.get('admin_email', 'test@example.com'))
-    
-    try:
-        send_email(
-            to_email=test_email_address,
-            subject='Test Email from HirePro',
-            body='This is a test email to verify SendGrid configuration is working correctly.'
-        )
-        return jsonify({
-            'message': 'Test email sent successfully!',
-            'sent_to': test_email_address,
-            'note': 'Check your inbox (and spam folder) for the test email.'
-        })
-    except Exception as e:
-        return jsonify({
-            'error': 'Failed to send test email',
-            'details': str(e),
-            'troubleshooting': {
-                'check_sendgrid_key': 'Verify SENDGRID_API_KEY is set correctly in Render dashboard',
-                'check_sender': 'Verify MAIL_DEFAULT_SENDER is set and the email is verified in SendGrid',
-                'verify_sender': 'Go to SendGrid dashboard > Settings > Sender Authentication to verify your sender email',
-                'check_permissions': 'Ensure your API key has "Mail Send" permissions'
-            }
-        }), 500
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
 REPORT_FOLDER = 'reports'
 os.makedirs(REPORT_FOLDER, exist_ok=True)
 
@@ -165,8 +123,13 @@ with app.app_context():
         raise
 
 # --- Email Configuration ---
-# Email sending is handled by email_helper.py using SendGrid API
-# Required environment variables: SENDGRID_API_KEY and MAIL_DEFAULT_SENDER
+app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER')
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
+app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'True').lower() in ['true', 'on', '1']
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER', app.config['MAIL_USERNAME'])
+mail = Mail(app)
 
 # --- Database Models ---
 class Admin(db.Model):
@@ -466,7 +429,6 @@ def send_invite(application_id):
     subject = f"Interview Invitation for the {app_data.title} role"
     body = f"""Dear Candidate,\n\nCongratulations! Your application for the {app_data.title} position has been shortlisted.\nPlease use the following link to complete your AI-proctored virtual interview:\n{interview_link}\n\nBest of luck!\nThe {session['company_name']} Hiring Team"""
     try:
-        # Use SendGrid API via email_helper
         send_email(app_data.email, subject, body)
         application = Application.query.get(application_id)
         application.status = 'Invited'
@@ -474,7 +436,7 @@ def send_invite(application_id):
         return jsonify({'message': 'Interview invitation sent.'})
     except Exception as e:
         print(f"MAIL SENDING ERROR: {e}")
-        return jsonify({'error': f'Failed to send email: {e}. Check server configuration.'}), 500
+        return jsonify({'error': f'Failed to send email: {str(e)}. Ensure MAIL_SERVER, MAIL_USERNAME, MAIL_PASSWORD are configured.'}), 500
 
 @app.route('/api/admin/update_status/<int:application_id>', methods=['POST'])
 def update_status(application_id):
@@ -499,7 +461,6 @@ def update_status(application_id):
         if status == 'Accepted':
             subject = "Update on your application"
             body = f"Congratulations! We would like to invite you to our office for the next round of interviews for the {app_data.title} role."
-            # Use SendGrid API via email_helper
             send_email(app_data.email, subject, body)
         
         application = Application.query.get(application_id)
@@ -507,7 +468,8 @@ def update_status(application_id):
         db.session.commit()
         return jsonify({'message': f'Candidate status updated to {status}.'})
     except Exception as e:
-        return jsonify({'error': f'Failed to send email: {e}.'}), 500
+        print(f"MAIL SENDING ERROR: {e}")
+        return jsonify({'error': f'Failed to send email: {str(e)}. Ensure MAIL_SERVER, MAIL_USERNAME, MAIL_PASSWORD are configured.'}), 500
 
 @app.route('/api/download_report/<int:application_id>')
 def download_report(application_id):
@@ -789,13 +751,10 @@ def generate_final_report():
         report_path = os.path.join(REPORT_FOLDER, f'report_application_{application_id}.pdf')
         with open(report_path, 'wb') as f: f.write(buffer.getvalue())
             
-        # Update application with report path and results
-        application = Application.query.get(application_id)
-        if application:
-            application.report_path = report_path
-            application.status = 'Completed'
-            application.interview_results = json.dumps(interview_results)
-            db.session.commit()
+        conn = get_db()
+        conn.execute("UPDATE applications SET report_path = ?, status = 'Completed', interview_results = ? WHERE id = ?", (report_path, json.dumps(interview_results), application_id))
+        conn.commit()
+        conn.close()
 
         session.clear()
         return jsonify({'message': 'Interview submitted successfully.'})

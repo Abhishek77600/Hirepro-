@@ -1,115 +1,50 @@
 ﻿"""
-Email sending helper using SendGrid Web API.
-Requires SENDGRID_API_KEY and MAIL_DEFAULT_SENDER environment variables.
+Email sending helper using SMTP.
+Configure MAIL_SERVER, MAIL_PORT, MAIL_USERNAME, MAIL_PASSWORD, and MAIL_DEFAULT_SENDER in env.
 """
 import os
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 
 def send_email(to_email, subject, body, html_body=None):
-    """
-    Send an email using SendGrid API.
-    Returns True on success, raises exception on failure.
+    """Send an email via SMTP. Returns True on success, raises on failure."""
     
-    Args:
-        to_email: Recipient email address
-        subject: Email subject
-        body: Plain text email body
-        html_body: Optional HTML email body
-    
-    Raises:
-        RuntimeError: If SendGrid API key is not configured
-        Exception: If email sending fails
-    """
-    sendgrid_key = os.getenv('SENDGRID_API_KEY')
-    sender = os.getenv('MAIL_DEFAULT_SENDER')
-    
-    # Detailed validation with helpful error messages
-    if not sendgrid_key:
-        error_msg = 'SENDGRID_API_KEY environment variable is not set. Please set it in Render dashboard under Environment variables.'
-        print(f"ERROR: {error_msg}")
-        raise RuntimeError(error_msg)
-    
-    if not sender:
-        error_msg = 'MAIL_DEFAULT_SENDER environment variable is not set. Please set it in Render dashboard under Environment variables.'
-        print(f"ERROR: {error_msg}")
-        raise RuntimeError(error_msg)
-    
-    # Validate API key format (should start with SG.)
-    if not sendgrid_key.startswith('SG.'):
-        error_msg = f'SENDGRID_API_KEY appears to be invalid. API keys should start with "SG." Got: {sendgrid_key[:10]}...'
-        print(f"ERROR: {error_msg}")
-        raise ValueError(error_msg)
-    
-    print(f"Attempting to send email via SendGrid:")
-    print(f"  From: {sender}")
-    print(f"  To: {to_email}")
-    print(f"  Subject: {subject}")
-    print(f"  API Key present: Yes (starts with SG.)")
-    
-    try:
-        sg = SendGridAPIClient(sendgrid_key)
-        message = Mail(
-            from_email=sender,
-            to_emails=to_email,
-            subject=subject,
-            plain_text_content=body
+    mail_server = os.getenv('MAIL_SERVER')
+    mail_port = int(os.getenv('MAIL_PORT', 587))
+    mail_username = os.getenv('MAIL_USERNAME')
+    mail_password = os.getenv('MAIL_PASSWORD')
+    sender = os.getenv('MAIL_DEFAULT_SENDER', mail_username)
+    use_tls = os.getenv('MAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes', 'on')
+
+    # Validate required config
+    if not mail_server or not mail_username or not mail_password:
+        raise RuntimeError(
+            'Email not configured. Set MAIL_SERVER, MAIL_USERNAME, MAIL_PASSWORD, '
+            'MAIL_DEFAULT_SENDER env vars'
         )
-        
-        if html_body:
-            message.html = html_body
-        
-        response = sg.send(message)
-        
-        # Check response status
-        status_code = response.status_code
-        print(f"SendGrid API response: status {status_code}")
-        
-        # SendGrid returns 202 for successful sends
-        if status_code == 202:
-            print(f"✓ Email sent successfully to {to_email}")
-            return True
-        else:
-            # Try to get response body for error details
-            try:
-                response_body = response.body.decode('utf-8') if response.body else 'No response body'
-                error_msg = f"SendGrid returned status {status_code}: {response_body}"
-                print(f"ERROR: {error_msg}")
-                raise Exception(error_msg)
-            except:
-                error_msg = f"SendGrid returned unexpected status code: {status_code}"
-                print(f"ERROR: {error_msg}")
-                raise Exception(error_msg)
-                
+
+    # Build message
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = sender
+    msg['To'] = to_email
+    msg.attach(MIMEText(body, 'plain'))
+    if html_body:
+        msg.attach(MIMEText(html_body, 'html'))
+
+    # Send via SMTP
+    try:
+        with smtplib.SMTP(mail_server, mail_port, timeout=20) as server:
+            server.ehlo()
+            if use_tls:
+                server.starttls()
+                server.ehlo()
+            server.login(mail_username, mail_password)
+            server.send_message(msg)
+        print(f"Email sent to {to_email} via SMTP")
+        return True
     except Exception as e:
-        # Handle all exceptions (SendGrid errors are regular exceptions)
-        error_details = str(e)
-        error_type = type(e).__name__
-        
-        # Try to extract more details from the exception
-        if hasattr(e, 'body') and e.body:
-            try:
-                import json
-                error_body = json.loads(e.body) if isinstance(e.body, str) else e.body
-                error_details = f"{error_details} - Details: {error_body}"
-            except:
-                try:
-                    error_details = f"{error_details} - Body: {e.body}"
-                except:
-                    pass
-        
-        # Check if it's an HTTP error (common with SendGrid)
-        if hasattr(e, 'status_code'):
-            status_code = e.status_code
-            error_msg = f"SendGrid API error (HTTP {status_code}): {error_details}"
-        else:
-            error_msg = f"SendGrid API error ({error_type}): {error_details}"
-        
-        print(f"ERROR: {error_msg}")
-        print(f"  This usually means:")
-        print(f"  1. API key is invalid or expired")
-        print(f"  2. Sender email ({sender}) is not verified in SendGrid")
-        print(f"  3. SendGrid account has restrictions")
-        print(f"  4. Network/connection issue")
-        raise Exception(error_msg)
+        print(f"SMTP send error: {e}")
+        raise
