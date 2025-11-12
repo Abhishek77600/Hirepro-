@@ -47,20 +47,18 @@ def health_check():
 @app.route('/api/debug/email_config')
 def debug_email_config():
     """Diagnostic endpoint: check email provider configuration (no secrets exposed)"""
-    resend_present = bool(os.getenv('RESEND_API_KEY'))
-    resend_client_ready = resend_client is not None
-    mail_sender = app.config.get('MAIL_DEFAULT_SENDER', 'NOT SET')
-    smtp_server = app.config.get('MAIL_SERVER', 'NOT SET')
-    smtp_port = app.config.get('MAIL_PORT', 'NOT SET')
+    gmail_user_present = bool(os.getenv('GMAIL_USER'))
+    gmail_password_present = bool(os.getenv('GMAIL_APP_PASSWORD'))
+    mail_sender = app.config.get('GMAIL_USER', 'NOT SET')
     
     return jsonify({
         'timestamp': datetime.utcnow().isoformat(),
-        'resend_api_key_present': resend_present,
-        'resend_client_initialized': resend_client_ready,
-        'mail_default_sender': mail_sender,
-        'smtp_server': smtp_server,
-        'smtp_port': smtp_port,
-        'primary_method': 'Resend API' if resend_client_ready else 'SMTP fallback' if smtp_server != 'NOT SET' else 'NONE - email may fail'
+        'gmail_user_present': gmail_user_present,
+        'gmail_app_password_present': gmail_password_present,
+        'mail_sender': mail_sender,
+        'smtp_server': 'smtp.gmail.com',
+        'smtp_port': 465,
+        'primary_method': 'Gmail SMTP' if (gmail_user_present and gmail_password_present) else 'NONE - email will fail'
     })
 
 
@@ -181,100 +179,51 @@ with app.app_context():
         raise
 
 
-# --- Email Configuration (Resend API only) ---
+# --- Email Configuration (Gmail SMTP) ---
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER', 'noreply@example.com')
-
-# Initialize Resend client (try SDK first, fallback to lightweight HTTP client)
-RESEND_API_KEY = os.getenv('RESEND_API_KEY')
-resend_client = None
-if RESEND_API_KEY:
-    try:
-        # Preferred: official Resend Python SDK (if available)
-        from resend import Resend
-        resend_client = Resend(RESEND_API_KEY)
-        print("✓ Resend SDK client initialized successfully")
-    except Exception as e:
-        print(f"⚠ Resend SDK import failed: {e}; falling back to HTTP API via requests")
-        # Fallback: simple HTTP client using requests so we don't depend on SDK shape
-        try:
-            import requests
-
-            class SimpleResendClient:
-                def __init__(self, api_key):
-                    self.api_key = api_key
-                    # mimic SDK surface: `.emails.send(...)`
-                    self.emails = self
-
-                def send(self, *args, **kwargs):
-                    # Accept positional or keyword args used by various SDK versions
-                    to = kwargs.get('to') or (args[0] if len(args) > 0 else None)
-                    from_ = kwargs.get('from_') or kwargs.get('from') or (args[1] if len(args) > 1 else None)
-                    subject = kwargs.get('subject') or (args[2] if len(args) > 2 else None)
-                    html = kwargs.get('html') or kwargs.get('text') or (args[3] if len(args) > 3 else None)
-
-                    if not (to and from_ and subject and html):
-                        raise ValueError('Missing required email fields for Resend HTTP API')
-
-                    payload = {
-                        'from': from_,
-                        'to': [to],
-                        'subject': subject,
-                        'html': html
-                    }
-
-                    resp = requests.post(
-                        'https://api.resend.com/emails',
-                        headers={
-                            'Authorization': f'Bearer {self.api_key}',
-                            'Content-Type': 'application/json'
-                        },
-                        json=payload,
-                        timeout=15
-                    )
-                    try:
-                        resp.raise_for_status()
-                        return {'status_code': resp.status_code, 'body': resp.text}
-                    except requests.exceptions.HTTPError as http_err:
-                        # Attach response text for easier debugging upstream
-                        content = resp.text
-                        raise RuntimeError(f"Resend HTTP {resp.status_code} error: {content}") from http_err
-
-            resend_client = SimpleResendClient(RESEND_API_KEY)
-            print('✓ Resend HTTP client configured')
-        except Exception as e2:
-            print(f"⚠ Failed to configure fallback Resend HTTP client: {e2}")
-else:
-    print("⚠ RESEND_API_KEY not set — email sending will fail")
+app.config['GMAIL_USER'] = os.getenv('GMAIL_USER')
+app.config['GMAIL_APP_PASSWORD'] = os.getenv('GMAIL_APP_PASSWORD')
 
 def send_email(to_email, subject, body, html_body=None):
-    """Send an email via Resend API (HTTPS-based, reliable on Render).
-    Requires RESEND_API_KEY env var to be set.
+    """Send an email via Gmail SMTP.
+    Requires GMAIL_USER and GMAIL_APP_PASSWORD env vars to be set.
     """
-    if not resend_client:
-        raise RuntimeError(
-            'Resend API not configured. Set RESEND_API_KEY environment variable. '
-            'Get it from https://resend.com/api-keys'
-        )
+    gmail_user = app.config.get('GMAIL_USER')
+    gmail_password = app.config.get('GMAIL_APP_PASSWORD')
     
-    sender = app.config.get('MAIL_DEFAULT_SENDER')
-    if not sender:
-        raise RuntimeError('MAIL_DEFAULT_SENDER environment variable is not set')
+    if not gmail_user or not gmail_password:
+        raise RuntimeError(
+            'Gmail SMTP not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD environment variables. '
+            'Get app password from: https://myaccount.google.com/apppasswords'
+        )
     
     try:
-        # Convert plain text to HTML if not provided
-        payload_html = html_body if html_body else (body.replace('\n', '<br/>'))
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['From'] = gmail_user
+        msg['To'] = to_email
+        msg['Subject'] = subject
         
-        print(f"Sending email via Resend: to={to_email}, from={sender}")
-        resp = resend_client.emails.send(
-            to=to_email,
-            from_=sender,
-            subject=subject,
-            html=payload_html
-        )
-        print(f"Email sent successfully via Resend: {resp}")
+        # Add HTML or plain text body
+        if html_body:
+            msg.attach(MIMEText(html_body, 'html'))
+        else:
+            msg.attach(MIMEText(body, 'plain'))
+        
+        # Connect to Gmail SMTP server
+        print(f"Sending email via Gmail SMTP: to={to_email}, from={gmail_user}")
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(gmail_user, gmail_password)
+            server.send_message(msg)
+        
+        print(f"Email sent successfully via Gmail to {to_email}")
         return True
     except Exception as e:
-        print(f"Resend API error: {e}")
+        print(f"Gmail SMTP error: {e}")
         import traceback
         traceback.print_exc()
         raise
