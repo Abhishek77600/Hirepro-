@@ -20,6 +20,8 @@ load_dotenv()
 
 from datetime import datetime
 from urllib.parse import urlparse
+from rq import Queue
+from redis import Redis
 
 app = Flask(__name__)
 
@@ -645,7 +647,29 @@ def send_invite(application_id):
         return jsonify({'message': 'Interview invitation sent.'})
     except Exception as e:
         print(f"MAIL SENDING ERROR: {e}")
-        return jsonify({'error': f'Failed to send email: {str(e)}. Ensure MAIL_SERVER, MAIL_USERNAME, MAIL_PASSWORD are configured.'}), 500
+        return jsonify({'error': f'Failed to send email: {str(e)}. Ensure RESEND_API_KEY and MAIL_DEFAULT_SENDER are configured.'}), 500
+
+
+@app.route('/api/admin/send_bulk_invites/<int:job_id>', methods=['POST'])
+def enqueue_bulk_invites(job_id):
+    """Enqueue a background job to send invites to all shortlisted candidates for a job.
+    Requires REDIS_URL environment variable to be set for RQ.
+    """
+    if session.get('user_type') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    REDIS_URL = os.getenv('REDIS_URL')
+    if not REDIS_URL:
+        return jsonify({'error': 'REDIS_URL not configured. Set REDIS_URL env var for RQ.'}), 500
+
+    try:
+        redis_conn = Redis.from_url(REDIS_URL)
+        q = Queue(connection=redis_conn)
+        job = q.enqueue('tasks.send_bulk_invites', job_id)
+        return jsonify({'message': 'Bulk invite job enqueued', 'job_id': job.get_id()}), 202
+    except Exception as e:
+        print(f"ENQUEUE ERROR: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/admin/update_status/<int:application_id>', methods=['POST'])
 def update_status(application_id):

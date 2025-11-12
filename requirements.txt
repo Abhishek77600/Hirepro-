@@ -10,3 +10,5 @@ SQLAlchemy
 Flask-SQLAlchemy
 resend
 requests
+rq
+redis
