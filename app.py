@@ -22,7 +22,6 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY', 'your-secret-key-here')  # Change this!
 
 @app.route('/health')
 def health_check():
@@ -101,8 +100,11 @@ def debug_db_config():
     except Exception as e:
         return jsonify({'error': f'Failed to parse DATABASE_URL: {str(e)}'}), 500
 
-app = Flask(__name__)
+# Flask configuration
 app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file upload
+app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour session timeout
+
 REPORT_FOLDER = 'reports'
 os.makedirs(REPORT_FOLDER, exist_ok=True)
 
@@ -281,38 +283,41 @@ def send_email(to_email, subject, body, html_body=None):
 class Admin(db.Model):
     __tablename__ = 'admins'
     id = db.Column(db.Integer, primary_key=True)
-    company_name = db.Column(db.String(), nullable=False)
-    email = db.Column(db.String(), unique=True, nullable=False)
-    phone = db.Column(db.String())
-    password = db.Column(db.String(), nullable=False)
-    jobs = db.relationship('Job', backref='admin', lazy=True)
+    company_name = db.Column(db.String(255), nullable=False)
+    email = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    phone = db.Column(db.String(20))
+    password = db.Column(db.String(255), nullable=False)
+    jobs = db.relationship('Job', backref='admin', lazy=True, cascade='all, delete-orphan')
 
 class Candidate(db.Model):
     __tablename__ = 'candidates'
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(), nullable=False)
-    email = db.Column(db.String(), unique=True, nullable=False)
-    password = db.Column(db.String(), nullable=False)
-    applications = db.relationship('Application', backref='candidate', lazy=True)
+    name = db.Column(db.String(255), nullable=False)
+    email = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    password = db.Column(db.String(255), nullable=False)
+    applications = db.relationship('Application', backref='candidate', lazy=True, cascade='all, delete-orphan')
 
 class Job(db.Model):
     __tablename__ = 'jobs'
     id = db.Column(db.Integer, primary_key=True)
-    admin_id = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=False)
-    title = db.Column(db.String(), nullable=False)
+    admin_id = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=False, index=True)
+    title = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, nullable=False)
-    applications = db.relationship('Application', backref='job', lazy=True)
+    applications = db.relationship('Application', backref='job', lazy=True, cascade='all, delete-orphan')
 
 class Application(db.Model):
     __tablename__ = 'applications'
     id = db.Column(db.Integer, primary_key=True)
-    candidate_id = db.Column(db.Integer, db.ForeignKey('candidates.id'), nullable=False)
-    job_id = db.Column(db.Integer, db.ForeignKey('jobs.id'), nullable=False)
+    candidate_id = db.Column(db.Integer, db.ForeignKey('candidates.id'), nullable=False, index=True)
+    job_id = db.Column(db.Integer, db.ForeignKey('jobs.id'), nullable=False, index=True)
     resume_text = db.Column(db.Text, nullable=False)
-    status = db.Column(db.String(), nullable=False, default='Applied')
+    status = db.Column(db.String(50), nullable=False, default='Applied', index=True)
     shortlist_reason = db.Column(db.Text)
-    report_path = db.Column(db.String())
+    report_path = db.Column(db.String(500))
     interview_results = db.Column(db.Text)
+    
+    # Add unique constraint to prevent duplicate applications
+    __table_args__ = (db.UniqueConstraint('candidate_id', 'job_id', name='unique_application'),)
 
 # Create database tables with retry logic
 def init_db(retries=5, delay=2):
@@ -373,21 +378,42 @@ def interview_page(application_id):
 @app.route('/api/register/admin', methods=['POST'])
 def register_admin():
     data = request.json
+    
+    # Input validation
+    if not data:
+        return jsonify({'error': 'No data provided.'}), 400
+    
+    required_fields = ['company_name', 'email', 'password']
+    for field in required_fields:
+        if not data.get(field):
+            return jsonify({'error': f'{field} is required.'}), 400
+    
+    # Email validation
+    email = data['email'].strip().lower()
+    if '@' not in email or len(email) < 5:
+        return jsonify({'error': 'Invalid email format.'}), 400
+    
+    # Password strength check
+    password = data['password']
+    if len(password) < 6:
+        return jsonify({'error': 'Password must be at least 6 characters.'}), 400
+    
     try:
         admin = Admin(
-            company_name=data['company_name'],
-            email=data['email'],
-            phone=data['phone'],
-            password=generate_password_hash(data['password'])
+            company_name=data['company_name'].strip(),
+            email=email,
+            phone=data.get('phone', '').strip(),
+            password=generate_password_hash(password)
         )
         db.session.add(admin)
         db.session.commit()
         return jsonify({'message': 'Registration successful.'})
     except Exception as e:
         db.session.rollback()
-        if 'unique constraint' in str(e).lower():
+        if 'unique constraint' in str(e).lower() or 'duplicate' in str(e).lower():
             return jsonify({'error': 'Email already exists.'}), 409
-        return jsonify({'error': 'Registration failed.'}), 500
+        print(f"Registration error: {e}")
+        return jsonify({'error': 'Registration failed. Please try again.'}), 500
 
 @app.route('/api/login/admin', methods=['POST'])
 def login_admin():
@@ -403,20 +429,41 @@ def login_admin():
 @app.route('/api/register/candidate', methods=['POST'])
 def register_candidate():
     data = request.json
+    
+    # Input validation
+    if not data:
+        return jsonify({'error': 'No data provided.'}), 400
+    
+    required_fields = ['name', 'email', 'password']
+    for field in required_fields:
+        if not data.get(field):
+            return jsonify({'error': f'{field} is required.'}), 400
+    
+    # Email validation
+    email = data['email'].strip().lower()
+    if '@' not in email or len(email) < 5:
+        return jsonify({'error': 'Invalid email format.'}), 400
+    
+    # Password strength check
+    password = data['password']
+    if len(password) < 6:
+        return jsonify({'error': 'Password must be at least 6 characters.'}), 400
+    
     try:
         candidate = Candidate(
-            name=data['name'],
-            email=data['email'],
-            password=generate_password_hash(data['password'])
+            name=data['name'].strip(),
+            email=email,
+            password=generate_password_hash(password)
         )
         db.session.add(candidate)
         db.session.commit()
         return jsonify({'message': 'Registration successful.'})
     except Exception as e:
         db.session.rollback()
-        if 'unique constraint' in str(e).lower():
+        if 'unique constraint' in str(e).lower() or 'duplicate' in str(e).lower():
             return jsonify({'error': 'Email already exists.'}), 409
-        return jsonify({'error': 'Registration failed.'}), 500
+        print(f"Registration error: {e}")
+        return jsonify({'error': 'Registration failed. Please try again.'}), 500
 
 @app.route('/api/login/candidate', methods=['POST'])
 def login_candidate():
@@ -513,11 +560,9 @@ def create_job():
         db.session.commit()
         print(f"Job created successfully with ID: {job.id}")
         
-        interview_link = url_for('interview_page', application_id=job.id, _external=True)
         return jsonify({
             'message': 'Job created successfully.',
-            'job_id': job.id,
-            'interview_link': interview_link
+            'job_id': job.id
         })
     except Exception as e:
         print(f"Error creating job: {str(e)}")
@@ -528,36 +573,63 @@ def create_job():
     
 @app.route('/api/admin/shortlist/<int:job_id>', methods=['POST'])
 def shortlist_candidates(job_id):
-    if session.get('user_type') != 'admin': return jsonify({'error': 'Unauthorized'}), 401
+    if session.get('user_type') != 'admin': 
+        return jsonify({'error': 'Unauthorized'}), 401
     
     job = Job.query.filter_by(id=job_id, admin_id=session['admin_id']).first()
-    if not job: return jsonify({'error': 'Job not found'}), 404
+    if not job: 
+        return jsonify({'error': 'Job not found'}), 404
     
     applications = Application.query.filter_by(job_id=job_id, status='Applied').all()
-    if not applications: return jsonify({'message': 'No new applications to shortlist.'})
+    if not applications: 
+        return jsonify({'message': 'No new applications to shortlist.'})
+    
+    if not model:
+        return jsonify({'error': 'AI model not configured. Cannot perform shortlisting.'}), 500
 
+    shortlisted_count = 0
+    rejected_count = 0
+    
     for app in applications:
-        prompt = f"""
-        Analyze if the candidate's resume is a good fit for the job description.
-        Provide a JSON response with two keys: "shortlisted" (boolean) and "reason" (a brief explanation).
+        prompt = f"""Analyze if the candidate's resume is a good fit for the job description.
+Provide a JSON response with exactly two keys: "shortlisted" (boolean) and "reason" (a brief explanation in 1-2 sentences).
 
-        **Job Description:**
-        {job.description}
+**Job Description:**
+{job.description[:1000]}
 
-        **Candidate Resume:**
-        {app.resume_text}
-        """
+**Candidate Resume:**
+{app.resume_text[:2000]}
+
+Return only valid JSON, no markdown formatting."""
+        
         try:
             response = model.generate_content(prompt)
-            result = json.loads(response.text.strip().replace('```json', '').replace('```', ''))
-            if result.get('shortlisted'):
+            cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
+            result = json.loads(cleaned_text)
+            
+            if result.get('shortlisted', False):
                 app.status = 'Shortlisted'
-                app.shortlist_reason = result.get('reason', '')
+                app.shortlist_reason = result.get('reason', 'Candidate profile matches job requirements.')
+                shortlisted_count += 1
+            else:
+                app.status = 'Rejected'
+                app.shortlist_reason = result.get('reason', 'Profile does not match requirements.')
+                rejected_count += 1
+                
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error for application {app.id}: {e}")
+            # Keep as Applied if AI fails
         except Exception as e:
             print(f"Error shortlisting application {app.id}: {e}")
+            # Keep as Applied if AI fails
 
     db.session.commit()
-    return jsonify({'message': f'Shortlisting complete for {len(applications)} applications.'})
+    return jsonify({
+        'message': f'Shortlisting complete.',
+        'total_processed': len(applications),
+        'shortlisted': shortlisted_count,
+        'rejected': rejected_count
+    })
 
 @app.route('/api/admin/send_invite/<int:application_id>', methods=['POST'])
 def send_invite(application_id):
@@ -572,10 +644,52 @@ def send_invite(application_id):
     if not app_data: return jsonify({'error': 'Application not found.'}), 404
     
     interview_link = url_for('interview_page', application_id=application_id, _external=True)
-    subject = f"Interview Invitation for the {app_data.title} role"
-    body = f"""Dear Candidate,\n\nCongratulations! Your application for the {app_data.title} position has been shortlisted.\nPlease use the following link to complete your AI-proctored virtual interview:\n{interview_link}\n\nBest of luck!\nThe {session['company_name']} Hiring Team"""
+    subject = f"🎉 Interview Invitation - {app_data.title} at {session['company_name']}"
+    
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9fafb;">
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px 10px 0 0; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">🎉 Congratulations!</h1>
+        </div>
+        
+        <div style="background-color: white; padding: 30px; border-radius: 0 0 10px 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <p style="font-size: 16px; color: #374151; line-height: 1.6;">Dear Candidate,</p>
+            
+            <p style="font-size: 16px; color: #374151; line-height: 1.6;">
+                Great news! Your application for the <strong>{app_data.title}</strong> position at <strong>{session['company_name']}</strong> has been shortlisted.
+            </p>
+            
+            <p style="font-size: 16px; color: #374151; line-height: 1.6;">
+                We're excited to invite you to the next stage: an AI-proctored virtual interview.
+            </p>
+            
+            <div style="text-align: center; margin: 30px 0;">
+                <a href="{interview_link}" 
+                   style="display: inline-block; background-color: #4f46e5; color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px;">
+                    Start Interview
+                </a>
+            </div>
+            
+            <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                <p style="margin: 0; color: #92400e; font-size: 14px;">
+                    <strong>⚠️ Important:</strong> Please ensure you have a working camera and microphone. The interview is proctored and requires your full attention.
+                </p>
+            </div>
+            
+            <p style="font-size: 14px; color: #6b7280; line-height: 1.6;">
+                Best of luck!<br>
+                <strong>The {session['company_name']} Hiring Team</strong>
+            </p>
+        </div>
+        
+        <div style="text-align: center; padding: 20px; color: #9ca3af; font-size: 12px;">
+            <p>This is an automated email from AI Interview Platform</p>
+        </div>
+    </div>
+    """
+    
     try:
-        send_email(app_data.email, subject, body)
+        send_email(app_data.email, subject, body=None, html_body=html_body)
         application = Application.query.get(application_id)
         application.status = 'Invited'
         db.session.commit()
@@ -605,9 +719,38 @@ def update_status(application_id):
 
     try:
         if status == 'Accepted':
-            subject = "Update on your application"
-            body = f"Congratulations! We would like to invite you to our office for the next round of interviews for the {app_data.title} role."
-            send_email(app_data.email, subject, body)
+            subject = f"✅ Congratulations! Next Steps for {app_data.title}"
+            html_body = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9fafb;">
+                <div style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); padding: 30px; border-radius: 10px 10px 0 0; text-align: center;">
+                    <h1 style="color: white; margin: 0; font-size: 28px;">✅ You're Moving Forward!</h1>
+                </div>
+                
+                <div style="background-color: white; padding: 30px; border-radius: 0 0 10px 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <p style="font-size: 16px; color: #374151; line-height: 1.6;">Dear Candidate,</p>
+                    
+                    <p style="font-size: 16px; color: #374151; line-height: 1.6;">
+                        Congratulations! We're impressed with your interview performance for the <strong>{app_data.title}</strong> position.
+                    </p>
+                    
+                    <p style="font-size: 16px; color: #374151; line-height: 1.6;">
+                        We would like to invite you to our office for the next round of interviews. Our team will contact you shortly with the details.
+                    </p>
+                    
+                    <div style="background-color: #d1fae5; border-left: 4px solid #10b981; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                        <p style="margin: 0; color: #065f46; font-size: 14px;">
+                            <strong>🎯 Next Steps:</strong> Keep an eye on your email for scheduling details.
+                        </p>
+                    </div>
+                    
+                    <p style="font-size: 14px; color: #6b7280; line-height: 1.6;">
+                        Looking forward to meeting you!<br>
+                        <strong>The {session['company_name']} Hiring Team</strong>
+                    </p>
+                </div>
+            </div>
+            """
+            send_email(app_data.email, subject, body=None, html_body=html_body)
         
         application = Application.query.get(application_id)
         application.status = status
@@ -619,20 +762,43 @@ def update_status(application_id):
 
 @app.route('/api/download_report/<int:application_id>')
 def download_report(application_id):
-    if 'admin_id' not in session: return "Unauthorized", 401
+    if 'admin_id' not in session: 
+        return jsonify({'error': 'Unauthorized'}), 401
     
     report = db.session.query(Application.report_path).join(Job).filter(
         Application.id == application_id,
         Job.admin_id == session['admin_id']
     ).first()
     
-    if report and report.report_path and os.path.exists(report.report_path):
+    if not report or not report.report_path:
+        return jsonify({'error': 'Report not found.'}), 404
+    
+    # Security: Ensure the path is within REPORT_FOLDER
+    report_path = os.path.abspath(report.report_path)
+    report_folder_abs = os.path.abspath(REPORT_FOLDER)
+    
+    if not report_path.startswith(report_folder_abs):
+        print(f"Security: Attempted path traversal - {report_path}")
+        return jsonify({'error': 'Invalid report path.'}), 403
+    
+    if not os.path.exists(report_path):
+        return jsonify({'error': 'Report file not found.'}), 404
+    
+    try:
+        with open(report_path, 'rb') as f:
+            pdf_data = f.read()
+        
         return Response(
-            open(report.report_path, 'rb'),
+            pdf_data,
             mimetype='application/pdf',
-            headers={'Content-Disposition': f'attachment;filename=report_application_{application_id}.pdf'}
+            headers={
+                'Content-Disposition': f'attachment;filename=report_application_{application_id}.pdf',
+                'Content-Length': len(pdf_data)
+            }
         )
-    return "Report not found.", 404
+    except Exception as e:
+        print(f"Error reading report file: {e}")
+        return jsonify({'error': 'Failed to read report.'}), 500
 
 # ==============================================================================
 # CANDIDATE API & SHARED HELPERS
@@ -700,19 +866,50 @@ def get_candidate_applications():
         'company_name': app.company_name
     } for app in applications])
     
-def generate_questions_for_job(job, skills):
-    if not model: return {"error": "AI model not configured."}
+def generate_questions_for_job(job_description, skills):
+    """Generate interview questions using AI with fallback to default questions"""
+    
+    # Default fallback questions
+    default_questions = [
+        "Could you please tell me about your relevant experience?",
+        "What is your biggest strength and how does it apply to this role?",
+        "Describe a challenging project you worked on and how you overcame obstacles.",
+        "Why are you interested in this position?",
+        "Where do you see yourself in 5 years?"
+    ]
+    
+    if not model:
+        print("AI model not configured, using default questions")
+        return {"questions": default_questions}
+    
     try:
-        prompt = f"""Act as an expert technical hiring manager. Generate 5 targeted interview questions...
-        **Job Requirements:**\n{job.description}\n
-        **Candidate's Skills:**\n{skills}\n
-        Provide a valid JSON with a key "questions" holding an array of 5 strings."""
+        prompt = f"""Act as an expert technical hiring manager. Generate 5 targeted interview questions based on the job requirements and candidate's background.
+
+**Job Requirements:**
+{job_description}
+
+**Candidate's Skills:**
+{skills}
+
+Provide a valid JSON response with a key "questions" containing an array of exactly 5 interview question strings. Make questions specific, relevant, and professional."""
+        
         response = model.generate_content(prompt)
         cleaned_response_text = response.text.strip().replace('```json', '').replace('```', '').strip()
-        return json.loads(cleaned_response_text)
+        result = json.loads(cleaned_response_text)
+        
+        # Validate response
+        if 'questions' in result and isinstance(result['questions'], list) and len(result['questions']) >= 5:
+            return {"questions": result['questions'][:5]}
+        else:
+            print("Invalid AI response format, using default questions")
+            return {"questions": default_questions}
+            
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error in question generation: {e}")
+        return {"questions": default_questions}
     except Exception as e:
         print(f"Error generating questions: {e}")
-        return {"questions": ["Could you please tell me about your experience?", "What is your biggest strength?", "What is your biggest weakness?", "Why are you interested in this role?", "Where do you see yourself in 5 years?"]}
+        return {"questions": default_questions}
 
 @app.route('/api/start_interview', methods=['POST'])
 def start_interview():
@@ -734,7 +931,7 @@ def start_interview():
     session['proctoring_flags'] = []
     session['last_tab_switch_ts'] = None
     
-    questions_data = generate_questions_for_job(app_data, app_data.resume_text)
+    questions_data = generate_questions_for_job(app_data.description, app_data.resume_text)
     return jsonify(questions_data)
 
 
@@ -819,50 +1016,126 @@ def make_casual_api():
 
 @app.route('/api/score_answer', methods=['POST'])
 def score_answer():
-    if not model: return jsonify({'error': 'AI model not configured.'}), 500
+    if not model: 
+        return jsonify({'error': 'AI model not configured.'}), 500
+    
     try:
         data = request.get_json()
-        question = data.get('question')
-        answer = data.get('answer')
+        if not data:
+            return jsonify({'error': 'No data provided.'}), 400
+            
+        question = data.get('question', '').strip()
+        answer = data.get('answer', '').strip()
 
         if not question or not answer:
             return jsonify({'error': 'Both question and answer are required.'}), 400
+        
+        if len(answer) < 10:
+            return jsonify({
+                'score': 2,
+                'feedback': 'Answer is too short. Please provide more detail.'
+            })
 
-        prompt = f"""
-        As an expert technical interviewer, evaluate the following answer for the given question.
-        Provide a score from 0 to 10 and concise, constructive feedback.
+        prompt = f"""As an expert technical interviewer, evaluate the following answer for the given question.
+Provide a score from 0 to 10 (integer) and concise, constructive feedback (2-3 sentences).
 
-        Question: "{question}"
-        Candidate's Answer: "{answer}"
+Question: "{question[:500]}"
+Candidate's Answer: "{answer[:1000]}"
 
-        Return a valid JSON object with two keys: "score" (an integer) and "feedback" (a string).
-        """
+Return ONLY valid JSON with exactly two keys: "score" (integer 0-10) and "feedback" (string).
+No markdown formatting."""
+
         response = model.generate_content(prompt)
         cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
-        return jsonify(json.loads(cleaned_text))
+        result = json.loads(cleaned_text)
+        
+        # Validate response
+        if 'score' not in result or 'feedback' not in result:
+            raise ValueError("Invalid AI response format")
+        
+        # Ensure score is an integer between 0-10
+        score = int(result['score'])
+        if score < 0 or score > 10:
+            score = max(0, min(10, score))
+        
+        return jsonify({
+            'score': score,
+            'feedback': result['feedback']
+        })
+        
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error in score_answer: {e}")
+        return jsonify({
+            'score': 5,
+            'feedback': 'Unable to evaluate answer at this time. Please continue with the interview.'
+        })
     except Exception as e:
-        return jsonify({'error': f'Failed to score answer: {e}'}), 500
+        print(f"Error scoring answer: {e}")
+        return jsonify({'error': 'Failed to score answer. Please try again.'}), 500
 
 @app.route('/api/generate_final_report', methods=['POST'])
 def generate_final_report():
-    if 'application_id' not in session: return jsonify({'error': 'Unauthorized'}), 401
+    if 'application_id' not in session: 
+        return jsonify({'error': 'Unauthorized. No active interview session.'}), 401
+    
     try:
         data = request.json
-        interview_results = data.get('interview_results')
+        if not data:
+            return jsonify({'error': 'No data provided.'}), 400
+            
+        interview_results = data.get('interview_results', [])
         proctoring_flags = data.get('proctoring_flags', [])
-        application_id = session['application_id']
-        job_requirements = session['job_requirements']
-
-        formatted_results = "\n".join([f"Q: {r['question']}\nA: {r['answer']}\nScore: {r['score']}/10\nFeedback: {r['feedback']}\n" for r in interview_results])
-
-        prompt = f"""Act as a senior hiring manager...
-        **Job Requirements:**\n{job_requirements}\n
-        **Interview Transcript & Evaluation:**\n{formatted_results}\n
-        Provide a JSON scorecard with keys: "overall_summary", "strengths", "areas_for_improvement", "final_recommendation"."""
+        application_id = session.get('application_id')
+        job_requirements = session.get('job_requirements', 'N/A')
         
-        response = model.generate_content(prompt)
-        cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
-        scorecard_data = json.loads(cleaned_text)
+        if not interview_results:
+            return jsonify({'error': 'No interview results provided.'}), 400
+
+        # Calculate average score
+        avg_score = sum(r.get('score', 0) for r in interview_results) / len(interview_results) if interview_results else 0
+        
+        formatted_results = "\n".join([
+            f"Q: {r.get('question', 'N/A')}\nA: {r.get('answer', 'N/A')}\nScore: {r.get('score', 0)}/10\nFeedback: {r.get('feedback', 'N/A')}\n" 
+            for r in interview_results
+        ])
+
+        # Generate AI scorecard with fallback
+        scorecard_data = {
+            'overall_summary': f'Candidate completed the interview with an average score of {avg_score:.1f}/10.',
+            'strengths': ['Completed all interview questions'],
+            'areas_for_improvement': ['Further evaluation recommended'],
+            'final_recommendation': 'Review Required'
+        }
+        
+        if model:
+            try:
+                prompt = f"""Act as a senior hiring manager. Analyze this interview performance and provide a comprehensive evaluation.
+
+**Job Requirements:**
+{job_requirements[:1000]}
+
+**Interview Transcript & Evaluation:**
+{formatted_results[:3000]}
+
+**Average Score:** {avg_score:.1f}/10
+
+Provide a JSON scorecard with exactly these keys:
+- "overall_summary": A 2-3 sentence summary of performance
+- "strengths": Array of 2-4 key strengths demonstrated
+- "areas_for_improvement": Array of 2-4 areas needing development
+- "final_recommendation": One of ["Strongly Recommend", "Recommend", "Consider", "Not Recommended"]
+
+Return only valid JSON, no markdown."""
+                
+                response = model.generate_content(prompt)
+                cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
+                ai_scorecard = json.loads(cleaned_text)
+                
+                # Validate and use AI scorecard
+                if all(key in ai_scorecard for key in ['overall_summary', 'strengths', 'areas_for_improvement', 'final_recommendation']):
+                    scorecard_data = ai_scorecard
+            except Exception as e:
+                print(f"Error generating AI scorecard: {e}. Using fallback.")
         
         # --- PDF Generation and Saving ---
         buffer = io.BytesIO()
@@ -896,11 +1169,14 @@ def generate_final_report():
         
         report_path = os.path.join(REPORT_FOLDER, f'report_application_{application_id}.pdf')
         with open(report_path, 'wb') as f: f.write(buffer.getvalue())
-            
-        conn = get_db()
-        conn.execute("UPDATE applications SET report_path = ?, status = 'Completed', interview_results = ? WHERE id = ?", (report_path, json.dumps(interview_results), application_id))
-        conn.commit()
-        conn.close()
+        
+        # Update application with report and results
+        application = Application.query.get(application_id)
+        if application:
+            application.report_path = report_path
+            application.status = 'Completed'
+            application.interview_results = json.dumps(interview_results)
+            db.session.commit()
 
         session.clear()
         return jsonify({'message': 'Interview submitted successfully.'})
@@ -909,4 +1185,3 @@ def generate_final_report():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True)
-
